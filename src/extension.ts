@@ -124,17 +124,106 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     // Handle drag
     async handleDrag(items: FileGroupItem[], dataTransfer: vscode.DataTransfer) {
         const uris: vscode.Uri[] = [];
+        let groupName: string | undefined;
+        
+        // Track if we're dragging a group to handle it specially
+        let isDraggingGroup = false;
         
         items.forEach(item => {
-            if (!item.isGroup && item.fullPath) {
+            if (item.isGroup) {
+                isDraggingGroup = true;
+                groupName = item.label;
+                // If dragging a group, get all files from that group
+                const group = this.groups.find(g => g.name === item.label);
+                if (group) {
+                    group.files.forEach(filePath => {
+                        try {
+                            if (require('fs').existsSync(filePath)) {
+                                uris.push(vscode.Uri.file(filePath));
+                            }
+                        } catch (error) {
+                            console.error(`Failed to create URI for path: ${filePath}`, error);
+                        }
+                    });
+                }
+            } else if (!item.isGroup && item.fullPath) {
                 uris.push(vscode.Uri.file(item.fullPath));
             }
         });
 
+        console.log(`Dragging ${uris.length} files ${isDraggingGroup ? `from group ${groupName}` : ''}`);
+
         if (uris.length > 0) {
-            // Support both internal drag and drop and dragging to editor
-            dataTransfer.set('text/uri-list', new vscode.DataTransferItem(uris));
-            dataTransfer.set('application/vnd.code.tree.fileGroups', new vscode.DataTransferItem(uris));
+            try {
+                // Format URI list properly for standard file drag operations
+                // This format is crucial for proper recognition by drop targets
+                const uriStrings = uris.map(uri => uri.toString()).join('\r\n');
+                dataTransfer.set('text/uri-list', new vscode.DataTransferItem(uriStrings));
+                
+                // VS Code specific format as array
+                dataTransfer.set('application/vnd.code.tree.fileGroups', new vscode.DataTransferItem(uris));
+                
+                // For groups, add metadata about the group being dragged
+                if (isDraggingGroup) {
+                    // Use a simple object that can be safely serialized
+                    const groupInfo = {
+                        isGroup: true,
+                        fileCount: uris.length,
+                        groupName: groupName
+                    };
+                    dataTransfer.set('application/vnd.groupi.group', new vscode.DataTransferItem(groupInfo));
+                    
+                    // Add plain text format for GitHub Copilot and other targets
+                    const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
+                    dataTransfer.set('text/plain', new vscode.DataTransferItem(`Group: ${groupName}\nFiles:\n${plainTextPaths}`));
+                    
+                    // Add file contents for Copilot (use separate async operation to avoid blocking UI)
+                    this.addFileContentsForCopilot(uris, dataTransfer, groupName);
+                } else {
+                    // For single files, just add the path as text/plain
+                    const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
+                    dataTransfer.set('text/plain', new vscode.DataTransferItem(plainTextPaths));
+                }
+            } catch (error) {
+                console.error('Error in handleDrag:', error);
+            }
+        }
+    }
+
+    // Helper method to read file contents for Copilot
+    private async addFileContentsForCopilot(uris: vscode.Uri[], dataTransfer: vscode.DataTransfer, groupName?: string): Promise<void> {
+        try {
+            const fileContents = await Promise.all(uris.map(async (uri) => {
+                try {
+                    const document = await vscode.workspace.openTextDocument(uri);
+                    return {
+                        name: path.basename(uri.fsPath),
+                        content: document.getText()
+                    };
+                } catch (error) {
+                    console.error(`Failed to read file: ${uri.fsPath}`, error);
+                    return null;
+                }
+            }));
+
+            // Filter out failed reads and create content string
+            const validContents = fileContents.filter((item): item is { name: string; content: string } => item !== null);
+            
+            if (validContents.length > 0) {
+                let copilotData = '';
+                
+                if (groupName) {
+                    copilotData = `Group: ${groupName}\n\n`;
+                }
+                
+                copilotData += validContents.map(file => 
+                    `File: ${file.name}\n\n\`\`\`\n${file.content}\n\`\`\`\n\n`
+                ).join('---\n\n');
+
+                dataTransfer.set('application/vnd.groupi.copilot', new vscode.DataTransferItem(copilotData));
+            }
+        } catch (error) {
+            console.error('Error preparing file contents for Copilot:', error);
         }
     }
 
@@ -744,6 +833,41 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     }
 }
 
+export async function registerCopilotDropTarget(context: vscode.ExtensionContext) {
+    // Register command to handle drops on Copilot
+    const disposable = vscode.commands.registerCommand('groupi.handleCopilotDrop', async (uris: vscode.Uri[]) => {
+        if (!uris || uris.length === 0) {
+            return;
+        }
+
+        try {
+            // Read all file contents
+            const fileContents = await Promise.all(uris.map(async (uri) => {
+                const document = await vscode.workspace.openTextDocument(uri);
+                return {
+                    name: path.basename(uri.fsPath),
+                    content: document.getText()
+                };
+            }));
+
+            // Format content for Copilot
+            const formattedContent = fileContents.map(file => 
+                `File: ${file.name}\n\n${file.content}\n\n`
+            ).join('---\n\n');
+
+            // Send to Copilot chat
+            await vscode.commands.executeCommand('github.copilot.chat.insertCodeBlock', formattedContent);
+            
+            vscode.window.showInformationMessage(`Added ${fileContents.length} files to Copilot chat`);
+        } catch (error) {
+            console.error('Error handling Copilot drop:', error);
+            vscode.window.showErrorMessage('Failed to add files to Copilot chat');
+        }
+    });
+
+    context.subscriptions.push(disposable);
+}
+
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Groupi extension is now active!');
     
@@ -1132,6 +1256,9 @@ export async function activate(context: vscode.ExtensionContext) {
             }
         })
     );
+
+    // Register Copilot drop target
+    await registerCopilotDropTarget(context);
 }
 
 // Update addToGroup function to handle multiple files
