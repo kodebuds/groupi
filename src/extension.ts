@@ -37,6 +37,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     private projectPath: string | undefined;
     private selectedItems: Set<string> = new Set();
     private fileSystemStorage: FileSystemStorageService | undefined;
+    private useWorkspaceStorage: boolean = true;
 
     public getCurrentBranchName(): string | undefined {
         return this.currentBranch;
@@ -51,8 +52,31 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         if (this.projectPath) {
             this.fileSystemStorage = new FileSystemStorageService(this.projectPath);
         }
+
+        // Load storage preference from settings
+        this.updateStoragePreference();
+
+        // Listen for configuration changes
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('groupi.storage.location')) {
+                this.updateStoragePreference();
+                // Reload groups after storage preference changes
+                this.loadState();
+            }
+        });
+
         this.loadState();
         this.selectedItems = new Set();
+    }
+
+    /**
+     * Updates the storage preference from user settings
+     */
+    private updateStoragePreference(): void {
+        const config = vscode.workspace.getConfiguration('groupi');
+        const storageLocation = config.get<string>('storage.location', 'workspace');
+        this.useWorkspaceStorage = storageLocation === 'workspace';
+        console.log(`Storage location set to: ${this.useWorkspaceStorage ? 'workspace' : 'VS Code storage'}`);
     }
 
     private getProjectPath(): string | undefined {
@@ -76,31 +100,56 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         }
 
         let savedGroups: FileGroup[] = [];
+        const config = vscode.workspace.getConfiguration('groupi');
+        const showMigrationNotification = config.get<boolean>('storage.migrationNotification', true);
 
-        // Try to load from file system first
-        if (this.fileSystemStorage) {
+        if (this.useWorkspaceStorage && this.fileSystemStorage) {
+            // User prefers workspace storage
             savedGroups = await this.fileSystemStorage.loadGroups(branch);
-        }
 
-        // If no groups found in file system, try to load from VS Code storage and migrate
-        if (savedGroups.length === 0) {
-            const storageKey = this.getStorageKey();
-            const vsCodeGroups = this.context.globalState.get<FileGroup[]>(storageKey, []);
+            // If no groups in workspace but they exist in VS Code storage, migrate them
+            if (savedGroups.length === 0) {
+                const storageKey = this.getStorageKey();
+                const vsCodeGroups = this.context.globalState.get<FileGroup[]>(storageKey, []);
 
-            if (vsCodeGroups.length > 0 && this.fileSystemStorage) {
-                // Migrate groups from VS Code storage to file system
-                const migrated = await this.fileSystemStorage.migrateFromGlobalState(
-                    this.context,
-                    this.storageKey,
-                    this.projectPath,
-                    branch
-                );
-
-                if (migrated) {
-                    savedGroups = vsCodeGroups;
-                    vscode.window.showInformationMessage(
-                        `Migrated ${savedGroups.length} groups to workspace storage for better portability`
+                if (vsCodeGroups.length > 0) {
+                    // Migrate groups from VS Code storage to file system
+                    const migrated = await this.fileSystemStorage.migrateFromGlobalState(
+                        this.context,
+                        this.storageKey,
+                        this.projectPath,
+                        branch
                     );
+
+                    if (migrated) {
+                        savedGroups = vsCodeGroups;
+                        if (showMigrationNotification) {
+                            vscode.window.showInformationMessage(
+                                `Migrated ${savedGroups.length} groups to workspace storage for better portability`
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            // User prefers VS Code storage
+            const storageKey = this.getStorageKey();
+            savedGroups = this.context.globalState.get<FileGroup[]>(storageKey, []);
+
+            // If no groups in VS Code storage but they exist in workspace, migrate them
+            if (savedGroups.length === 0 && this.fileSystemStorage) {
+                const hasWorkspaceGroups = await this.fileSystemStorage.hasGroups(branch);
+                if (hasWorkspaceGroups) {
+                    const workspaceGroups = await this.fileSystemStorage.loadGroups(branch);
+                    if (workspaceGroups.length > 0) {
+                        savedGroups = workspaceGroups;
+                        await this.context.globalState.update(storageKey, workspaceGroups);
+                        if (showMigrationNotification) {
+                            vscode.window.showInformationMessage(
+                                `Migrated ${workspaceGroups.length} groups from workspace to VS Code storage`
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -110,12 +159,11 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         this._onDidChangeTreeData.fire(undefined);
 
         // Show notification only when actually switching branches
-        if (previousBranch !== branch) {
-            if (this.groups.length > 0) {
-                vscode.window.showInformationMessage(
-                    `Loaded ${this.groups.length} groups from branch: ${branch}`
-                );
-            }
+        if (previousBranch !== branch && this.groups.length > 0) {
+            const storageType = this.useWorkspaceStorage ? 'workspace' : 'VS Code';
+            vscode.window.showInformationMessage(
+                `Loaded ${this.groups.length} groups from branch: ${branch} (${storageType} storage)`
+            );
         }
     }
 
@@ -131,11 +179,12 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
             branch: this.currentBranch
         }));
 
-        // Save to file system if available
-        if (this.fileSystemStorage) {
+        if (this.useWorkspaceStorage && this.fileSystemStorage) {
+            // Save to workspace storage
             await this.fileSystemStorage.saveGroups(groupsToSave, this.currentBranch);
+            console.log(`Saved ${groupsToSave.length} groups to workspace storage for branch: ${this.currentBranch}`);
         } else {
-            // Fallback to VS Code storage if file system storage is not available
+            // Save to VS Code storage
             const project = this.projectPath || 'default';
             const key = `${this.storageKey}.${project}.${this.currentBranch}`;
             await this.context.globalState.update(key, groupsToSave);
@@ -860,6 +909,88 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         }
     }
 
+    /**
+     * Migrates groups between storage locations based on user preference
+     */
+    async migrateStorage() {
+        if (!this.currentBranch || !this.projectPath) {
+            vscode.window.showErrorMessage('Cannot migrate: no active branch or project');
+            return;
+        }
+
+        // Get current storage preference
+        const config = vscode.workspace.getConfiguration('groupi');
+        const currentStorage = config.get<string>('storage.location', 'workspace');
+        const targetStorage = currentStorage === 'workspace' ? 'vscode' : 'workspace';
+
+        // Ask for confirmation
+        const confirmation = await vscode.window.showInformationMessage(
+            `Migrate groups from ${currentStorage} to ${targetStorage} storage?`,
+            'Yes', 'No'
+        );
+
+        if (confirmation !== 'Yes') {
+            return;
+        }
+
+        try {
+            if (targetStorage === 'workspace') {
+                // Migrate from VS Code to workspace
+                if (!this.fileSystemStorage) {
+                    vscode.window.showErrorMessage('Cannot migrate: workspace storage not available');
+                    return;
+                }
+
+                const storageKey = this.getStorageKey();
+                const vsCodeGroups = this.context.globalState.get<FileGroup[]>(storageKey, []);
+
+                if (vsCodeGroups.length === 0) {
+                    vscode.window.showInformationMessage('No groups to migrate from VS Code storage');
+                    return;
+                }
+
+                await this.fileSystemStorage.saveGroups(vsCodeGroups, this.currentBranch);
+
+                // Update preference
+                await config.update('storage.location', 'workspace', vscode.ConfigurationTarget.Global);
+
+                vscode.window.showInformationMessage(
+                    `Successfully migrated ${vsCodeGroups.length} groups to workspace storage`
+                );
+            } else {
+                // Migrate from workspace to VS Code
+                if (!this.fileSystemStorage) {
+                    vscode.window.showErrorMessage('Cannot migrate: workspace storage not available');
+                    return;
+                }
+
+                const workspaceGroups = await this.fileSystemStorage.loadGroups(this.currentBranch);
+
+                if (workspaceGroups.length === 0) {
+                    vscode.window.showInformationMessage('No groups to migrate from workspace storage');
+                    return;
+                }
+
+                const storageKey = this.getStorageKey();
+                await this.context.globalState.update(storageKey, workspaceGroups);
+
+                // Update preference
+                await config.update('storage.location', 'vscode', vscode.ConfigurationTarget.Global);
+
+                vscode.window.showInformationMessage(
+                    `Successfully migrated ${workspaceGroups.length} groups to VS Code storage`
+                );
+            }
+
+            // Reload groups with new storage preference
+            this.updateStoragePreference();
+            await this.loadState();
+        } catch (error) {
+            console.error('Error migrating storage:', error);
+            vscode.window.showErrorMessage(`Failed to migrate groups: ${error}`);
+        }
+    }
+
     async openAllFilesInGroup(groupName: string): Promise<void> {
         const group = this.groups.find(g => g.name === groupName);
         if (!group) {
@@ -872,13 +1003,31 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         for (const filePath of group.files) {
             try {
                 const uri = vscode.Uri.file(filePath);
-                await vscode.workspace.openTextDocument(uri);
-                await vscode.window.showTextDocument(uri, {
-                    preview: false,
-                    preserveFocus: true,
-                    viewColumn: vscode.ViewColumn.Active
-                });
-                openedCount++;
+                const fileExtension = path.extname(filePath).toLowerCase();
+
+                // Special handling for specific file types
+                if (fileExtension === '.ipynb' || fileExtension === '.db' ||
+                    fileExtension === '.sqlite' || fileExtension === '.sqlite3') {
+                    // Use executeCommand to open these files with their specialized editors
+                    await vscode.commands.executeCommand('vscode.open', uri);
+                    openedCount++;
+                } else {
+                    // Standard text file opening
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, {
+                            preview: false,
+                            preserveFocus: true,
+                            viewColumn: vscode.ViewColumn.Active
+                        });
+                        openedCount++;
+                    } catch (textError) {
+                        // If opening as text fails, try the generic opener
+                        console.log('Could not open as text document, trying generic opener');
+                        await vscode.commands.executeCommand('vscode.open', uri);
+                        openedCount++;
+                    }
+                }
             } catch (error) {
                 console.error(`Failed to open file: ${filePath}`, error);
                 errorCount++;
@@ -954,17 +1103,8 @@ export async function activate(context: vscode.ExtensionContext) {
     // Add double-click handler
     vscode.commands.registerCommand('list.itemClick', async (item: FileGroupItem) => {
         if (!item.isGroup && item.fullPath) {
-            try {
-                const uri = vscode.Uri.file(item.fullPath);
-                const doc = await vscode.workspace.openTextDocument(uri);
-                await vscode.window.showTextDocument(doc, {
-                    preview: false,
-                    preserveFocus: false
-                });
-            } catch (error) {
-                console.error('Failed to open file:', error);
-                vscode.window.showErrorMessage(`Failed to open file: ${item.fullPath}`);
-            }
+            // Use the openFile command to ensure consistent file opening behavior
+            await vscode.commands.executeCommand('groupi.openFile', item.fullPath);
         }
     });
 
@@ -1146,11 +1286,27 @@ export async function activate(context: vscode.ExtensionContext) {
                 console.log('Opening file:', filePath);
 
                 const uri = vscode.Uri.file(filePath);
-                const doc = await vscode.workspace.openTextDocument(uri);
-                await vscode.window.showTextDocument(doc, {
-                    preview: false,
-                    preserveFocus: false
-                });
+                const fileExtension = path.extname(filePath).toLowerCase();
+
+                // Special handling for specific file types
+                if (fileExtension === '.ipynb' || fileExtension === '.db' ||
+                    fileExtension === '.sqlite' || fileExtension === '.sqlite3') {
+                    // Use executeCommand to open these files with their specialized editors
+                    await vscode.commands.executeCommand('vscode.open', uri);
+                } else {
+                    // Standard text file opening
+                    try {
+                        const doc = await vscode.workspace.openTextDocument(uri);
+                        await vscode.window.showTextDocument(doc, {
+                            preview: false,
+                            preserveFocus: false
+                        });
+                    } catch (textError) {
+                        // If opening as text fails, try the generic opener
+                        console.log('Could not open as text document, trying generic opener');
+                        await vscode.commands.executeCommand('vscode.open', uri);
+                    }
+                }
             } catch (error) {
                 console.error('Failed to open file:', error);
                 vscode.window.showErrorMessage(`Failed to open file: ${filePath}`);
@@ -1225,6 +1381,9 @@ export async function activate(context: vscode.ExtensionContext) {
         // Add collapse command
         vscode.commands.registerCommand('groupi.collapseAll', () => {
             vscode.commands.executeCommand('workbench.actions.treeView.fileGroups.collapseAll');
+        }),
+        vscode.commands.registerCommand('groupi.migrateStorage', async () => {
+            await groupProvider.migrateStorage();
         })
     );
 

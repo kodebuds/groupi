@@ -2,7 +2,7 @@
   "name": "groupi",
   "displayName": "Groupi",
   "description": "Organize and manage files in groups with Git integration",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "kodebuds",
   "author": {
     "name": "kodebuds",
@@ -116,6 +116,11 @@
         "command": "groupi.collapseAll",
         "title": "Collapse All Groups",
         "icon": "$(collapse-all)"
+      },
+      {
+        "command": "groupi.migrateStorage",
+        "title": "Groupi-Migrate Groups",
+        "icon": "$(sync)"
       }
     ],
     "viewsContainers": {
@@ -314,6 +319,17 @@
           "type": "boolean",
           "default": true,
           "description": "Enable/disable Copilot instruction files processing"
+        },
+        "groupi.storage.location": {
+          "type": "string",
+          "enum": ["workspace", "vscode"],
+          "default": "workspace",
+          "description": "Where to store groups: 'workspace' (in project directory) or 'vscode' (in VS Code's storage)"
+        },
+        "groupi.storage.migrationNotification": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show notification when groups are migrated between storage locations"
         }
       }
     }
