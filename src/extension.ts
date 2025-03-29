@@ -1,12 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { InstructionToggleService } from './instructionToggle';
-
-interface FileGroup {
-    name: string;
-    files: string[];
-    branch?: string;
-}
+import { FileGroup, FileSystemStorageService } from './fileSystemStorage';
 
 // 1. Update FileGroupItem class
 class FileGroupItem extends vscode.TreeItem {
@@ -20,9 +15,9 @@ class FileGroupItem extends vscode.TreeItem {
             label,
             isGroup ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None
         );
-        
+
         this.contextValue = isGroup ? 'group' : 'file';
-        
+
         if (isGroup) {
             this.iconPath = new vscode.ThemeIcon('folder');
         } else if (fullPath) {
@@ -41,6 +36,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     private storageKey = 'groupi.projectGroups';
     private projectPath: string | undefined;
     private selectedItems: Set<string> = new Set();
+    private fileSystemStorage: FileSystemStorageService | undefined;
 
     public getCurrentBranchName(): string | undefined {
         return this.currentBranch;
@@ -52,6 +48,9 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
     constructor(private context: vscode.ExtensionContext) {
         this.projectPath = this.getProjectPath();
+        if (this.projectPath) {
+            this.fileSystemStorage = new FileSystemStorageService(this.projectPath);
+        }
         this.loadState();
         this.selectedItems = new Set();
     }
@@ -70,23 +69,44 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         const branch = await this.getCurrentBranch();
         const previousBranch = this.currentBranch;
         this.currentBranch = branch;
-        
-        // Get all stored groups for this project
-        const storageKey = this.getStorageKey();
-        const savedGroups = this.context.globalState.get<FileGroup[]>(storageKey, []);
-        
-        // Update groups and notify view
-        this.groups = savedGroups.map(group => ({
-            ...group,
-            files: group.files.filter(file => {
-                try {
-                    return require('fs').existsSync(file);
-                } catch {
-                    return false;
-                }
-            })
-        }));
 
+        if (!branch || !this.projectPath) {
+            console.error('Cannot load state: missing branch or project path');
+            return;
+        }
+
+        let savedGroups: FileGroup[] = [];
+
+        // Try to load from file system first
+        if (this.fileSystemStorage) {
+            savedGroups = await this.fileSystemStorage.loadGroups(branch);
+        }
+
+        // If no groups found in file system, try to load from VS Code storage and migrate
+        if (savedGroups.length === 0) {
+            const storageKey = this.getStorageKey();
+            const vsCodeGroups = this.context.globalState.get<FileGroup[]>(storageKey, []);
+
+            if (vsCodeGroups.length > 0 && this.fileSystemStorage) {
+                // Migrate groups from VS Code storage to file system
+                const migrated = await this.fileSystemStorage.migrateFromGlobalState(
+                    this.context,
+                    this.storageKey,
+                    this.projectPath,
+                    branch
+                );
+
+                if (migrated) {
+                    savedGroups = vsCodeGroups;
+                    vscode.window.showInformationMessage(
+                        `Migrated ${savedGroups.length} groups to workspace storage for better portability`
+                    );
+                }
+            }
+        }
+
+        // Update groups and notify view
+        this.groups = savedGroups;
         this._onDidChangeTreeData.fire(undefined);
 
         // Show notification only when actually switching branches
@@ -100,21 +120,27 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     }
 
     private async saveState() {
-        if (!this.currentBranch) {
+        if (!this.currentBranch || !this.projectPath) {
+            console.error('Cannot save state: missing branch or project path');
             return;
         }
-        
-        const project = this.projectPath || 'default';
-        const key = `${this.storageKey}.${project}.${this.currentBranch}`;
-        
+
         // Save groups with branch info
         const groupsToSave = this.groups.map(group => ({
             ...group,
             branch: this.currentBranch
         }));
 
-        await this.context.globalState.update(key, groupsToSave);
-        console.log(`Saved ${groupsToSave.length} groups to branch: ${this.currentBranch}`);
+        // Save to file system if available
+        if (this.fileSystemStorage) {
+            await this.fileSystemStorage.saveGroups(groupsToSave, this.currentBranch);
+        } else {
+            // Fallback to VS Code storage if file system storage is not available
+            const project = this.projectPath || 'default';
+            const key = `${this.storageKey}.${project}.${this.currentBranch}`;
+            await this.context.globalState.update(key, groupsToSave);
+            console.log(`Saved ${groupsToSave.length} groups to VS Code storage for branch: ${this.currentBranch}`);
+        }
     }
 
     // Add drag and drop support
@@ -125,10 +151,10 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     async handleDrag(items: FileGroupItem[], dataTransfer: vscode.DataTransfer) {
         const uris: vscode.Uri[] = [];
         let groupName: string | undefined;
-        
+
         // Track if we're dragging a group to handle it specially
         let isDraggingGroup = false;
-        
+
         items.forEach(item => {
             if (item.isGroup) {
                 isDraggingGroup = true;
@@ -159,10 +185,10 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
                 // This format is crucial for proper recognition by drop targets
                 const uriStrings = uris.map(uri => uri.toString()).join('\r\n');
                 dataTransfer.set('text/uri-list', new vscode.DataTransferItem(uriStrings));
-                
+
                 // VS Code specific format as array
                 dataTransfer.set('application/vnd.code.tree.fileGroups', new vscode.DataTransferItem(uris));
-                
+
                 // For groups, add metadata about the group being dragged
                 if (isDraggingGroup) {
                     // Use a simple object that can be safely serialized
@@ -172,11 +198,11 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
                         groupName: groupName
                     };
                     dataTransfer.set('application/vnd.groupi.group', new vscode.DataTransferItem(groupInfo));
-                    
+
                     // Add plain text format for GitHub Copilot and other targets
                     const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
                     dataTransfer.set('text/plain', new vscode.DataTransferItem(`Group: ${groupName}\nFiles:\n${plainTextPaths}`));
-                    
+
                     // Add file contents for Copilot (use separate async operation to avoid blocking UI)
                     this.addFileContentsForCopilot(uris, dataTransfer, groupName);
                 } else {
@@ -208,15 +234,15 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
             // Filter out failed reads and create content string
             const validContents = fileContents.filter((item): item is { name: string; content: string } => item !== null);
-            
+
             if (validContents.length > 0) {
                 let copilotData = '';
-                
+
                 if (groupName) {
                     copilotData = `Group: ${groupName}\n\n`;
                 }
-                
-                copilotData += validContents.map(file => 
+
+                copilotData += validContents.map(file =>
                     `File: ${file.name}\n\n\`\`\`\n${file.content}\n\`\`\`\n\n`
                 ).join('---\n\n');
 
@@ -283,7 +309,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
                 placeHolder: 'New Group'
             });
             if (!name) { return; }
-            
+
             this.addGroup(name);
             targetGroup = name;
         } else if (target.isGroup) {
@@ -300,11 +326,11 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
         for (const uri of uris) {
             if (token.isCancellationRequested) { break; }
-            
+
             try {
                 const filePath = uri.fsPath;
                 const exists = await this.checkFileExists(filePath);
-                
+
                 if (exists) {
                     this.addFileToGroup(targetGroup, filePath);
                     successCount++;
@@ -342,7 +368,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
     getTreeItem(element: FileGroupItem): FileGroupItem {
         const item = element;
-        
+
         // Add selection state and double-click behavior
         if (this.selectedItems.has(this.getItemKey(element))) {
             item.contextValue = (item.contextValue || '') + ' selected';
@@ -358,7 +384,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
                 };
             }
         }
-        
+
         return item;
     }
 
@@ -368,7 +394,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
     toggleSelection(item: FileGroupItem, multiSelect: boolean = false) {
         const key = this.getItemKey(item);
-        
+
         if (!multiSelect) {
             // Single selection - clear other selections
             this.selectedItems.clear();
@@ -387,7 +413,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         return Array.from(this.selectedItems).map(key => {
             const [type, ...parts] = key.split(':');
             const value = parts.join(':');
-            
+
             if (type === 'group') {
                 return new FileGroupItem(value, true);
             } else {
@@ -399,7 +425,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         if (!element) {
             // Root level - return groups
             return this.groups.map(g => new FileGroupItem(
-                g.name, 
+                g.name,
                 true
             ));
         } else if (element.isGroup) {
@@ -485,7 +511,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
             if (!extension) {
                 return undefined;
             }
-            
+
             const gitExtension = extension.isActive ? extension.exports : await extension.activate();
             return gitExtension?.getAPI(1);
         } catch (error) {
@@ -528,12 +554,22 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         }
     }
 
-    private getGroupsFromBranch(branch: string): FileGroup[] {
+    private async getGroupsFromBranch(branch: string): Promise<FileGroup[]> {
         try {
+            // Try to get groups from file system first
+            if (this.fileSystemStorage) {
+                const groups = await this.fileSystemStorage.loadGroups(branch);
+                if (groups.length > 0) {
+                    console.log(`Found ${groups.length} groups in branch ${branch} from file system`);
+                    return groups;
+                }
+            }
+
+            // Fallback to VS Code storage
             const project = this.projectPath || 'default';
             const key = `${this.storageKey}.${project}.${branch}`;
             const groups = this.context.globalState.get<FileGroup[]>(key, []);
-            console.log(`Found ${groups.length} groups in branch ${branch}`);
+            console.log(`Found ${groups.length} groups in branch ${branch} from VS Code storage`);
             return groups;
         } catch (error) {
             console.error(`Error getting groups from branch ${branch}:`, error);
@@ -542,7 +578,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
     }
 
     async copyGroupsFromBranch(sourceBranch: string) {
-        const sourceGroups = this.getGroupsFromBranch(sourceBranch);
+        const sourceGroups = await this.getGroupsFromBranch(sourceBranch);
         if (sourceGroups.length === 0) {
             vscode.window.showInformationMessage(`No groups found in branch: ${sourceBranch}`);
             return;
@@ -570,7 +606,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
             const newName = this.groups.find(g => g.name === group.name)
                 ? `${group.name} (from ${sourceBranch})`
                 : group.name;
-            
+
             this.groups.push({
                 ...group,
                 name: newName,
@@ -592,11 +628,25 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
             console.log('Checking groups in branches:', allBranches);
 
             // Filter branches that have groups
-            const branchesWithGroups = allBranches.filter(branch => {
+            const branchesWithGroups = [];
+
+            for (const branch of allBranches) {
+                // Check file system storage first
+                if (this.fileSystemStorage) {
+                    const groups = await this.fileSystemStorage.loadGroups(branch);
+                    if (groups.length > 0) {
+                        branchesWithGroups.push(branch);
+                        continue;
+                    }
+                }
+
+                // Fallback to VS Code storage
                 const key = `${this.storageKey}.${this.projectPath || 'default'}.${branch}`;
                 const groups = this.context.globalState.get<FileGroup[]>(key, []);
-                return groups.length > 0;
-            });
+                if (groups.length > 0) {
+                    branchesWithGroups.push(branch);
+                }
+            }
 
             console.log('Branches with groups:', branchesWithGroups);
             return branchesWithGroups;
@@ -621,7 +671,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
         try {
             await this.ensureGitExtension();
             const newBranch = await this.getCurrentBranch();
-            
+
             if (!newBranch) {
                 console.error('No branch detected');
                 return;
@@ -631,8 +681,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
             // Save current groups to current branch before switching
             if (this.currentBranch && this.groups.length > 0) {
-                const oldKey = `${this.storageKey}.${this.projectPath || 'default'}.${this.currentBranch}`;
-                await this.context.globalState.update(oldKey, this.groups);
+                await this.saveState();
                 console.log(`Saved ${this.groups.length} groups to branch ${this.currentBranch}`);
             }
 
@@ -641,23 +690,36 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
             this.currentBranch = newBranch;
 
             // Load groups from new branch
-            const newKey = `${this.storageKey}.${this.projectPath || 'default'}.${newBranch}`;
-            const branchGroups = this.context.globalState.get<FileGroup[]>(newKey, []);
-            
+            let branchGroups: FileGroup[] = [];
+
+            // Try to load from file system first
+            if (this.fileSystemStorage) {
+                branchGroups = await this.fileSystemStorage.loadGroups(newBranch);
+            }
+
+            // If no groups found in file system, try to load from VS Code storage
+            if (branchGroups.length === 0) {
+                const newKey = `${this.storageKey}.${this.projectPath || 'default'}.${newBranch}`;
+                branchGroups = this.context.globalState.get<FileGroup[]>(newKey, []);
+
+                // If groups found in VS Code storage, migrate them to file system
+                if (branchGroups.length > 0 && this.fileSystemStorage) {
+                    await this.fileSystemStorage.migrateFromGlobalState(
+                        this.context,
+                        this.storageKey,
+                        this.projectPath || 'default',
+                        newBranch
+                    );
+                }
+            }
+
             if (branchGroups && branchGroups.length > 0) {
                 console.log(`Loading ${branchGroups.length} groups from branch ${newBranch}`);
-                
-                // Validate files and update branch reference
+
+                // Update branch reference
                 this.groups = branchGroups.map(group => ({
                     ...group,
-                    branch: newBranch,
-                    files: group.files.filter(file => {
-                        try {
-                            return require('fs').existsSync(file);
-                        } catch {
-                            return false;
-                        }
-                    })
+                    branch: newBranch
                 }));
             }
 
@@ -680,7 +742,7 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
             // Get branches with groups
             const branchesWithGroups = await this.getBranchesWithGroups();
             console.log(`Branches with groups: ${branchesWithGroups.join(', ')}`);
-            
+
             if (branchesWithGroups.length === 0) {
                 vscode.window.showInformationMessage('No groups found in other branches');
                 return;
@@ -688,12 +750,15 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
             // Let user select source branch
             const selectedBranch = await vscode.window.showQuickPick(
-                branchesWithGroups.map(branch => ({
-                    label: branch,
-                    description: `${this.getGroupsFromBranch(branch).length} groups`,
-                    detail: this.getGroupsFromBranch(branch)
-                        .map(g => `${g.name} (${g.files.length} files)`)
-                        .join(', ')
+                await Promise.all(branchesWithGroups.map(async branch => {
+                    const groups = await this.getGroupsFromBranch(branch);
+                    return {
+                        label: branch,
+                        description: `${groups.length} groups`,
+                        detail: groups
+                            .map(g => `${g.name} (${g.files.length} files)`)
+                            .join(', ')
+                    };
                 })),
                 {
                     placeHolder: 'Select branch to copy groups from',
@@ -703,8 +768,8 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
             if (!selectedBranch) { return; }
 
-            const sourceGroups = this.getGroupsFromBranch(selectedBranch.label);
-            const duplicateGroups = sourceGroups.filter(g => 
+            const sourceGroups = await this.getGroupsFromBranch(selectedBranch.label);
+            const duplicateGroups = sourceGroups.filter(g =>
                 this.groups.some(existing => existing.name === g.name)
             );
 
@@ -741,10 +806,10 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
                 selectedGroups.forEach(selection => {
                     const group = selection.group;
                     const isDuplicate = this.groups.some(g => g.name === group.name);
-                    
+
                     if (!isDuplicate || choice === 'Rename Duplicates') {
-                        const newName = isDuplicate ? 
-                            `${group.name} (from ${selectedBranch.label})` : 
+                        const newName = isDuplicate ?
+                            `${group.name} (from ${selectedBranch.label})` :
                             group.name;
 
                         this.groups.push({
@@ -851,13 +916,13 @@ export async function registerCopilotDropTarget(context: vscode.ExtensionContext
             }));
 
             // Format content for Copilot
-            const formattedContent = fileContents.map(file => 
+            const formattedContent = fileContents.map(file =>
                 `File: ${file.name}\n\n${file.content}\n\n`
             ).join('---\n\n');
 
             // Send to Copilot chat
             await vscode.commands.executeCommand('github.copilot.chat.insertCodeBlock', formattedContent);
-            
+
             vscode.window.showInformationMessage(`Added ${fileContents.length} files to Copilot chat`);
         } catch (error) {
             console.error('Error handling Copilot drop:', error);
@@ -870,9 +935,9 @@ export async function registerCopilotDropTarget(context: vscode.ExtensionContext
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('Groupi extension is now active!');
-    
+
     const groupProvider = new FileGroupProvider(context);
-    const treeView = vscode.window.createTreeView('fileGroups', { 
+    const treeView = vscode.window.createTreeView('fileGroups', {
         treeDataProvider: groupProvider,
         dragAndDropController: groupProvider,
         canSelectMany: true // Enable multi-select
@@ -904,7 +969,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
 
     let disposable = vscode.commands.registerCommand('groupi.createGroup', async () => {
-        const name = await vscode.window.showInputBox({ 
+        const name = await vscode.window.showInputBox({
             prompt: 'Enter Groupi name',
             placeHolder: 'My Groupi'
         });
@@ -924,11 +989,11 @@ export async function activate(context: vscode.ExtensionContext) {
 
                 const groups = Array.from(groupProvider.getChildren())
                     .filter((item): item is FileGroupItem => item instanceof FileGroupItem);
-                
+
                 let selectedGroup: { label: string, groupId: string } | undefined;
-                
+
                 if (groups.length === 0) {
-                    const name = await vscode.window.showInputBox({ 
+                    const name = await vscode.window.showInputBox({
                         prompt: 'Create new group for file',
                         placeHolder: 'My Group'
                     });
@@ -1003,7 +1068,7 @@ export async function activate(context: vscode.ExtensionContext) {
             let groupName: string | undefined;
 
             if (groups.length === 0) {
-                const name = await vscode.window.showInputBox({ 
+                const name = await vscode.window.showInputBox({
                     prompt: 'Enter new group name for open files',
                     placeHolder: 'Editor Files'
                 });
@@ -1036,19 +1101,19 @@ export async function activate(context: vscode.ExtensionContext) {
                     }
                 });
             });
-            
+
             if (allTabs.length === 0) {
                 vscode.window.showInformationMessage('No opened files to add.');
                 return;
             }
-        
+
             // Get available groups
             const groups = groupProvider.getChildren().map(item => item.label);
             let selectedGroup: string | undefined;
-        
+
             if (groups.length === 0) {
                 // If no groups exist, create one
-                const name = await vscode.window.showInputBox({ 
+                const name = await vscode.window.showInputBox({
                     prompt: 'Enter new group name for opened files',
                     placeHolder: 'Opened Files'
                 });
@@ -1063,7 +1128,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     { placeHolder: `Select a group to add ${allTabs.length} files to` }
                 );
             }
-        
+
             if (selectedGroup) {
                 // Add all files to the selected group
                 allTabs.forEach(uri => {
@@ -1079,7 +1144,7 @@ export async function activate(context: vscode.ExtensionContext) {
             try {
                 if (!filePath) { return; }
                 console.log('Opening file:', filePath);
-                
+
                 const uri = vscode.Uri.file(filePath);
                 const doc = await vscode.workspace.openTextDocument(uri);
                 await vscode.window.showTextDocument(doc, {
@@ -1128,7 +1193,7 @@ export async function activate(context: vscode.ExtensionContext) {
                     prompt: 'Enter new group name',
                     value: item.label  // Current group name
                 });
-                
+
                 if (newName) {
                     // Call the provider method to update the name
                     groupProvider.updateGroupName(item.label, newName);
@@ -1143,7 +1208,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 console.error('Error executing copyGroupFromBranch command:', error);
                 vscode.window.showErrorMessage('Failed to copy groups from branch');
             }
-        }),        
+        }),
         vscode.commands.registerCommand('groupi.deleteAllGroups', async () => {
             await groupProvider.deleteAllGroups();
         }),
@@ -1176,7 +1241,7 @@ export async function activate(context: vscode.ExtensionContext) {
     syncStatusBarItem.text = '$(sync)';
     syncStatusBarItem.tooltip = "Sync Groups";
     syncStatusBarItem.show();
-    
+
     // Register copy branch command
     let copyBranchDisposable = vscode.commands.registerCommand('groupi.copyBranchName', async () => {
         const git = vscode.extensions.getExtension('vscode.git')?.exports.getAPI(1);
@@ -1192,7 +1257,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 }
             }
         }
-    });   
+    });
     context.subscriptions.push(statusBarItem);
     context.subscriptions.push(copyBranchDisposable);
 
@@ -1207,7 +1272,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 groupProvider.setCurrentBranch(initialBranch);
                 await groupProvider.loadState();
             }
-            
+
             // Monitor branch changes
             repo.state.onDidChange(async () => {
                 const currentBranch = await groupProvider.getCurrentBranch();
@@ -1240,8 +1305,8 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Initialize the instruction state
     await vscode.commands.executeCommand(
-        'setContext', 
-        'github.copilot.chat.codeGeneration.useInstructionFiles', 
+        'setContext',
+        'github.copilot.chat.codeGeneration.useInstructionFiles',
         instructionToggle.isEnabled()
     );
 
@@ -1261,8 +1326,8 @@ export async function activate(context: vscode.ExtensionContext) {
     await registerCopilotDropTarget(context);
 }
 
-// Update addToGroup function to handle multiple files
-async function addToGroup(files: vscode.Uri | vscode.Uri[], groupName: string, provider: FileGroupProvider) {
+// Helper function to add files to a group
+export async function addToGroup(files: vscode.Uri | vscode.Uri[], groupName: string, provider: FileGroupProvider) {
     const uris = Array.isArray(files) ? files : [files];
     uris.forEach(uri => {
         provider.addFileToGroup(groupName, uri.fsPath);

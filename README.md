@@ -28,25 +28,23 @@ Organize and manage your files into customizable groups with seamless Git integr
 ### Creating a New Group
 
 1. Open the **Groupi** view from the Activity Bar.
-2. Click on the **Create New Group** button .
+2. Click on the **Create New Group** button (+).
 3. Enter a name for your new group.
 
 ### Adding Files to a Group
 
 - **Drag and Drop**:
-
   1. Drag files from the **File Explorer**.
   2. Drop them into an existing group or into the empty space to create a new group.
 
 - **Using Commands**:
   1. Select a file in the editor.
-  2. Right-click and choose `Add to Group` .
+  2. Right-click and choose `Add to Group`.
   3. Choose the target group from the list.
 
 ### Managing Groups
 
 - **Rename a Group**:
-
   1. Right-click on the group you want to rename.
   2. Select `Rename Group` and enter the new name.
 
@@ -57,25 +55,21 @@ Organize and manage your files into customizable groups with seamless Git integr
 ### Git Integration
 
 - **Sync with Git Branch**:
-
   - Use the `Groupi: Sync with Git Branch` command to synchronize your groups with the current Git branch. This allows different groupings for different branches.
 
 - **Copy Groups from Another Branch**:
-  1. Use the `Groups from Branch` .
+  1. Use the `Groups from Branch` command.
   2. Select the source branch and the groups you want to copy.
 
 ### Additional Commands
 
 - **Add All Opened Files**:
-
   - Use the `Groupi: Add All Opened Files` command to add all currently opened files in your editor to a selected group.
 
 - **Open File in Split Editor**:
-
   - Right-click on a file and select `Open in Split Editor` to view it alongside another file.
 
 - **Copy File Paths**:
-
   - Use `Copy Path` or `Copy Relative Path` from the context menu to copy file paths to your clipboard.
 
 - **Reveal in File Explorer**:
@@ -108,4 +102,4 @@ This project is licensed under the [MIT License](LICENSE).
 - Inspired by the need for better file organization within VS Code.
 - Developed by [kodebuds](https://github.com/kodebuds).
 
-  ** Enjoy Organizing with Groupi **
+**Enjoy Organizing with Groupi!**

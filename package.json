@@ -2,7 +2,7 @@
   "name": "groupi",
   "displayName": "Groupi",
   "description": "Organize and manage files in groups with Git integration",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "publisher": "kodebuds",
   "author": {
     "name": "kodebuds",
@@ -43,7 +43,7 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
-    "commands": [      
+    "commands": [
       {
         "command": "groupi.createGroup",
         "title": "Create New Group",
@@ -58,7 +58,7 @@
         "command": "groupi.addAllOpenedFiles",
         "title": "Add All Files",
         "icon": "$(files)"
-      },      
+      },
       {
         "command": "groupi.removeFromGroup",
         "title": "Delete",
@@ -71,13 +71,13 @@
       },
       {
         "command": "groupi.copyGroupFromBranch",
-        "title": "Group from Branch",      
+        "title": "Group from Branch",
         "icon": "$(git-branch)"
-      },      
+      },
       {
         "command": "groupi.openFile",
-        "title": "Open File"        
-      },      
+        "title": "Open File"
+      },
       {
         "command": "groupi.openAllFiles",
         "title": "Open All Files",
@@ -98,7 +98,7 @@
       {
         "command": "groupi.revealInFileExplorer",
         "title": "Reveal in File Explorer"
-      },      
+      },
       {
         "command": "groupi.renameGroup",
         "title": "Rename Group"
@@ -134,7 +134,8 @@
           "name": "Groupi",
           "visibility": "visible",
           "dragAndDropController": true,
-          "canAcceptDrop": true
+          "canAcceptDrop": true,
+          "icon": "$(files)"
         }
       ]
     },
@@ -153,20 +154,20 @@
       ],
       "groupi.submenu": [
         {
-          "command": "groupi.addToGroup",          
-          "group": "1_creation@1",     
+          "command": "groupi.addToGroup",
+          "group": "1_creation@1",
           "when": "resourceFilename"
         },
         {
           "command": "groupi.addAllOpenedFiles",
           "title": "Add All Files",
-          "group": "1_creation@2"         
+          "group": "1_creation@2"
         },
         {
           "command": "groupi.createGroup",
           "title": "Create New Group",
           "group": "1_creation@3"
-        }, 
+        },
         {
           "command": "groupi.syncWithBranch",
           "title": "Sync with Git Branch",
@@ -181,7 +182,7 @@
           "icon": "$(file-add)"
         },
         {
-          "command": "groupi.addAllOpenedFiles",         
+          "command": "groupi.addAllOpenedFiles",
           "when": "view == fileGroups",
           "group": "navigation@2",
           "icon": "$(files)"
@@ -192,7 +193,7 @@
           "when": "view == fileGroups",
           "group": "navigation@3",
           "icon": "$(symbol-folder)"
-        },        
+        },
         {
           "command": "groupi.copyGroupFromBranch",
           "when": "view == fileGroups",
