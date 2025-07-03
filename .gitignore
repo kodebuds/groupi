@@ -25,7 +25,7 @@ jspm_packages/
 out/
 dist/
 build/
-*.vsix
+#*.vsix
 
 # IDEs and editors
 .vscode/
