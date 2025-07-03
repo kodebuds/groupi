@@ -25,7 +25,7 @@ jspm_packages/
 out/
 dist/
 build/
-*.vsix
+#*.vsix
 
 # IDEs and editors
 .vscode/
@@ -60,3 +60,7 @@ vsc-extension-quickstart.md
 # Operating System
 .DS_Store
 Thumbs.db
+
+# Groupi groups storage
+# Uncomment the next line if you don't want to share your groups with your team
+#.groupi/
