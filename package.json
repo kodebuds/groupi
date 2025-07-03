@@ -2,7 +2,7 @@
   "name": "groupi",
   "displayName": "Groupi",
   "description": "Organize and manage files in groups with Git integration", 
-  "version": "0.1.1",
+  "version": "1.0.0",
   "publisher": "kodebuds",
   "author": {
     "name": "kodebuds",

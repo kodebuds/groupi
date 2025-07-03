@@ -25,6 +25,7 @@ Organize and manage your files into customizable groups with seamless Git integr
 
 ## Usage
 
+
 ### Creating a New Group
 
 1. Open the **Groupi** view from the Activity Bar.
@@ -43,6 +44,14 @@ Organize and manage your files into customizable groups with seamless Git integr
   3. Choose the target group from the list.
 
 ### Managing Groups
+
+- **Reorder Groups (Drag and Drop)**:
+  1. Drag a group and drop it above or below another group to change the order.
+  2. The new order is saved and reflected immediately.
+
+- **Open All Files in a Group (Drag to Editor)**:
+  1. Drag a group from the Groupi view and drop it onto the editor area.
+  2. All files in the group will open in the editor.
 
 - **Rename a Group**:
   1. Right-click on the group you want to rename.
