@@ -198,67 +198,43 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
     // Handle drag
     async handleDrag(items: FileGroupItem[], dataTransfer: vscode.DataTransfer) {
-        const uris: vscode.Uri[] = [];
-        let groupName: string | undefined;
-
-        // Track if we're dragging a group to handle it specially
-        let isDraggingGroup = false;
-
-        items.forEach(item => {
-            if (item.isGroup) {
-                isDraggingGroup = true;
-                groupName = item.label;
-                // If dragging a group, get all files from that group
-                const group = this.groups.find(g => g.name === item.label);
+        // If dragging only groups, serialize their names for reordering and also set file URIs for editor drop
+        const groupNames = items.filter(i => i.isGroup).map(i => i.label);
+        if (groupNames.length > 0 && groupNames.length === items.length) {
+            dataTransfer.set('application/vnd.groupi.group', new vscode.DataTransferItem(JSON.stringify(groupNames)));
+            // Collect all files from all dragged groups
+            let uris: vscode.Uri[] = [];
+            for (const groupName of groupNames) {
+                const group = this.groups.find(g => g.name === groupName);
                 if (group) {
-                    group.files.forEach(filePath => {
-                        try {
-                            if (require('fs').existsSync(filePath)) {
-                                uris.push(vscode.Uri.file(filePath));
-                            }
-                        } catch (error) {
-                            console.error(`Failed to create URI for path: ${filePath}`, error);
-                        }
-                    });
+                    uris.push(...group.files.map(f => vscode.Uri.file(f)));
                 }
-            } else if (!item.isGroup && item.fullPath) {
+            }
+            if (uris.length > 0) {
+                try {
+                    const uriStrings = uris.map(uri => uri.toString()).join('\r\n');
+                    dataTransfer.set('text/uri-list', new vscode.DataTransferItem(uriStrings));
+                    const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
+                    dataTransfer.set('text/plain', new vscode.DataTransferItem(plainTextPaths));
+                } catch (error) {
+                    console.error('Error in handleDrag (group files):', error);
+                }
+            }
+            return;
+        }
+        // Otherwise, fallback to file drag (existing logic)
+        const uris: vscode.Uri[] = [];
+        items.forEach(item => {
+            if (!item.isGroup && item.fullPath) {
                 uris.push(vscode.Uri.file(item.fullPath));
             }
         });
-
-        console.log(`Dragging ${uris.length} files ${isDraggingGroup ? `from group ${groupName}` : ''}`);
-
         if (uris.length > 0) {
             try {
-                // Format URI list properly for standard file drag operations
-                // This format is crucial for proper recognition by drop targets
                 const uriStrings = uris.map(uri => uri.toString()).join('\r\n');
                 dataTransfer.set('text/uri-list', new vscode.DataTransferItem(uriStrings));
-
-                // VS Code specific format as array
-                dataTransfer.set('application/vnd.code.tree.fileGroups', new vscode.DataTransferItem(uris));
-
-                // For groups, add metadata about the group being dragged
-                if (isDraggingGroup) {
-                    // Use a simple object that can be safely serialized
-                    const groupInfo = {
-                        isGroup: true,
-                        fileCount: uris.length,
-                        groupName: groupName
-                    };
-                    dataTransfer.set('application/vnd.groupi.group', new vscode.DataTransferItem(groupInfo));
-
-                    // Add plain text format for GitHub Copilot and other targets
-                    const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
-                    dataTransfer.set('text/plain', new vscode.DataTransferItem(`Group: ${groupName}\nFiles:\n${plainTextPaths}`));
-
-                    // Add file contents for Copilot (use separate async operation to avoid blocking UI)
-                    this.addFileContentsForCopilot(uris, dataTransfer, groupName);
-                } else {
-                    // For single files, just add the path as text/plain
-                    const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
-                    dataTransfer.set('text/plain', new vscode.DataTransferItem(plainTextPaths));
-                }
+                const plainTextPaths = uris.map(uri => uri.fsPath).join('\n');
+                dataTransfer.set('text/plain', new vscode.DataTransferItem(plainTextPaths));
             } catch (error) {
                 console.error('Error in handleDrag:', error);
             }
@@ -304,6 +280,29 @@ class FileGroupProvider implements vscode.TreeDataProvider<FileGroupItem>, vscod
 
     // Handle drop
     async handleDrop(target: FileGroupItem | undefined, dataTransfer: vscode.DataTransfer, token: vscode.CancellationToken): Promise<void> {
+        // Check for group reordering drag (custom type)
+        const groupDrag = dataTransfer.get('application/vnd.groupi.group');
+        if (groupDrag && typeof groupDrag.value === 'string') {
+            try {
+                const draggedNames: string[] = JSON.parse(groupDrag.value);
+                let newOrder = this.groups.filter(g => !draggedNames.includes(g.name));
+                let insertAt = newOrder.length;
+                if (target && target.isGroup) {
+                    const idx = newOrder.findIndex(g => g.name === target.label);
+                    if (idx !== -1) { insertAt = idx; }
+                }
+                const draggedObjs = draggedNames.map(name => this.groups.find(g => g.name === name)).filter(Boolean) as FileGroup[];
+                newOrder.splice(insertAt, 0, ...draggedObjs);
+                this.groups = newOrder;
+                await this.saveState();
+                this._onDidChangeTreeData.fire(undefined);
+            } catch (e) {
+                console.error('Failed to reorder groups:', e);
+            }
+            return;
+        }
+
+        // Default: file drop (existing logic)
         const transferItem = dataTransfer.get('text/uri-list');
         if (!transferItem) {
             return;
